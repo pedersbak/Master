@@ -1,0 +1,669 @@
+---
+title: | 
+  | Miniproject in Introduction to Data Science
+  | ITVEST Data Science and Big Data (DSBD)
+output:
+  pdf_document: 
+    number_sections: true
+    dev: png
+  html_document: 
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, dpi = 300)
+```
+
+```{r, message=F, warning=F}
+library(tidyverse)
+library(lubridate)
+library(pander) # for prettier tables
+library(scales) # for making prettier axes in plots
+library(stringr)
+library(sqldf)
+
+theme_set(theme_bw())
+
+panderOptions('big.mark', ',')
+```
+
+# Formalia
+
+Deadline for hand-in: Jan 3, 2018 at 23:55.
+
+Where: Moodle.
+
+What: Rmd file. Possibly also pdf (or html), but Rmd is mandatory.
+
+Groups: Maximum 3 participants, however the project must be handed in individually.
+
+# Exercises
+
+Here, we focus on the `airlines`, `airports`, `flights`, `planes`, and `weather`  datasets:
+
+```{r, echo = TRUE}
+library(nycflights13)
+
+```
+
+Remember to read about the datasets.
+
+# Exercises
+
+
+## Exercise
+
+**Construct a barplot displaying number of flights per month.**  
+Basic barplot - lets add monthnames as a ordered factor, to have maeningsful labels on the x-axis and ordering the months, according to the calendar
+
+```{r tidy=FALSE}
+library(ggplot2)
+flightsWithMontName <- mutate(flights, mname = month.abb[month]) 
+flightsWithMontName$mname <- 
+  factor(flightsWithMontName$mname,
+         levels = c("Jan", "Feb", "Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec" ))
+
+p<-ggplot(data=flightsWithMontName, aes(x=mname)) +
+  geom_bar()   
+p
+
+```
+
+**Now, in the barplot (showing number of flights per month), make a separate bar for each origin.**  
+
+```{r}
+p2<-ggplot(data=flightsWithMontName, aes(fill=origin,x=mname)) +
+  geom_bar(position="dodge")
+p2
+```
+
+## Exercise
+
+**What are the top-10 destinations and how many flights were made to these?**  
+
+There is a sqldf package, that allows SQL code to be run against dataframes and tibbles. 
+Generally, throughout this miniproject, I will utillize both SQL and R syntax in selecting, joining etc.
+
+Trying out this SQL technique
+```{r}
+Toplist <- 
+  sqldf('select dest, count(*) as numberOfFlights 
+          from flights 
+         group by dest 
+        order by numberOfFlights desc')
+```
+
+For illustration purposes, below is shown another technique.  
+Please note, first use of pipe operator (from magrittr, which is included in tidyverse).  
+```{r}
+Toplist <- flights %>% count(dest) %>%  arrange(desc(n))
+Toplist10 <- Toplist %>% top_n(10) 
+names(Toplist10)[2] = "numberOfFlights"
+# Pretty print using pander
+pander(Toplist10, big.mark=',', justify = c('left','right'))
+```
+
+**For these 10 destinations, make a barplot illustrating the number of flights from origin to top-10 destination.**  
+```{r}
+
+Toplist10DestOrigin <- 
+  sqldf('select dest, 
+                origin, 
+                count(*) as numberOfFlights 
+           from flightsWithMontName 
+          where dest in (select dest from Toplist10) 
+          group by dest, origin 
+          order by numberOfFlights desc');
+p4<-ggplot(data=Toplist10DestOrigin, aes(x=dest, y=numberOfFlights, fill=origin)) +
+  geom_bar(stat="identity", position="dodge") 
+p4
+
+```
+
+**Now, order the bars (destinations) according to the total number of flights to these destinations.**  
+
+This is done by creating a new Destination variable as a ordered factor, with levels ordered by the number of flight to these destinations.
+```{r}
+library(dplyr)
+# Create a new ordered factor (vector)
+orderedDestinationFactor <- 
+  dplyr::arrange(Toplist10,numberOfFlights) %>% 
+  select(.,dest) %>% 
+  unlist(.) %>% 
+  ordered(.)
+# Explanation of the above PIPE:
+# arrange step: sort TopList10 by numberOfFligths       
+# select      : isolate destination variable
+# unlist      : select returns list, must be vector
+# ordered     : creates ordered factor
+
+# Create new column - orderedDest - from the new factor (vector)
+Toplist10DestOrigin$orderedDest <- factor(Toplist10DestOrigin$dest, 
+                                          levels = orderedDestinationFactor)
+
+# Printing the plot again, now ordering the facet_grid by the new o
+# rderedDest variable (ascending)
+
+
+p5<-ggplot(data=Toplist10DestOrigin, aes(x=orderedDest, y=numberOfFlights, fill=origin)) +
+  geom_bar(stat="identity", position="dodge") 
+p5
+```
+
+## Exercise
+
+**Is the mean air time from each of the three origins different? Further, are these differences statistically significant?**  
+
+Lets plot the data, to have a first look at the means and individual observations, to get a feel for data  
+We will create a dataframe that contains the means and plot them together with the individual observations
+
+```{r}
+# Please note, that for illustration purposes, two different techniques 
+# for removing observations with NA values in the relevant column have been used
+myGroupedMeans <- group_by(flights, origin) %>%
+  summarise(
+    air_time = mean(air_time, na.rm = TRUE)
+  )
+
+flights %>% filter(!is.na(origin)&!is.na(air_time)) %>% 
+ggplot(., aes(x = origin, y = air_time)) +
+  geom_point(alpha = .1, na.rm=TRUE) +
+  geom_point(data=myGroupedMeans, size=4, color="red") 
+
+
+```
+
+In this plot, air_time looks like the means are different but not by a lot, but lets take a closer look:  
+```{r}
+pander(myGroupedMeans, big.mark=',', justify = c('left','right'))
+```
+
+Lets statistically test the following hypotheses:  
+* NULL Hypothosis: the means aitime are all the same  
+* Alternative hypothesis: atleast one mean airtime is different from the other means  
+
+Let us fit two models:  
+* a very simple model, predicting air_time from no variables (returns the mean) and   
+* a model. predicting airtime from the origin variable  
+  
+ANOVA takes two fitted models and computes analysis of variance
+
+```{r}
+
+model1 = lm(air_time ~ 1, data = flights) 
+model2 = lm(air_time ~ origin, data = flights) 
+anova(model1, model2)
+  
+summary(model2)
+```
+
+Well, looking at the P-values, which is VERY small (2.2e-16<0.05), it looks like we shold reject our NULL hypothesis that the means are equal.  
+This means, that there is actually a significant difference between the means of airtime.  
+Further analysis using Tukey Method could reviel the actual differences  
+
+## Exercise
+
+**How many weather observations are there for each origin?**  
+
+Using SQL syntax and pander for pretty printing
+```{r}
+sqldf('select origin, 
+              count(*) as numberOfObservations 
+         from weather 
+        group by origin') %>% 
+pander(., big.mark=',', justify = c('left','right'))
+```
+
+**Convert temperature to degrees Celsius. This will be used in the reminder of this miniproject.**  
+**(We do this for both `temp` and `dewp` using `mutate_at`)**  
+  
+Importing weathermetrics package, that has conversion functions btw celcius and fahrenheit
+
+```{r}
+library(weathermetrics)
+celciusWeather <- weather %>% mutate_at(vars(temp,dewp),funs(fahrenheit.to.celsius))
+
+```
+
+**Construct a graph displaying the temperature at `JFK`.**  
+
+```{r, message=F, warning=F}
+p6 <- filter(celciusWeather, origin == "JFK") %>% ggplot(., aes(time_hour, temp)) + 
+  geom_line(color="blue") 
+p6
+
+```
+
+**Add a red line showing the mean temperature for each day.**  
+  
+First, lets filter the data to JFK.  
+Secondly, truncate the timestamp to "day".  
+Thirdly, lets calculate the mean for each day.  
+  
+Now, add a line to the previous lot, describing the mean for each day.  
+
+```{r}
+JFKtemps <- filter(celciusWeather, origin == "JFK") 
+JFKtemps$date <- floor_date(JFKtemps$time_hour,"day")
+JFKmeanTemps <- JFKtemps %>% group_by(date) %>% summarise_each(funs(mean(.)),temp)
+
+p6 + geom_line(data=JFKmeanTemps,aes(date, temp), color="red") + 
+  ggtitle("Mean temperatures at JFK")
+```
+
+**Now, visualuse the daily mean temperature for each origin airport.**  
+
+```{r}
+meanTemps <- celciusWeather
+## Create a truncated date variable
+meanTemps$date <- floor_date(meanTemps$time_hour,"day")
+meanTemps <- meanTemps %>% group_by(date, origin) %>% summarise_each(funs(mean(.)),temp)
+
+p7 <- ggplot(meanTemps, aes(date, temp, group = origin, color=origin)) + 
+  geom_line(na.rm=TRUE) + facet_grid(origin ~ .)
+p7
+
+```
+
+
+
+## Exercise
+
+**Investigate if arrival delay is associated with the flight distance (and also departure delay).**  
+  
+All good data analysis starts with a visualization
+```{r}
+ggplot(flights, aes(x=distance, y=arr_delay)) + geom_point(na.rm=TRUE)
+```
+It does not visually seen like delay is associated with flight distance.  
+But, to be more scientific about it, lets do a correlation test (Pearsons):  
+This test fits a linear model and returns a measure of how good the points fit the line.  
+This measure is 0 for no correlation, and -1 or 1 for complete correlation (positive or negative slope of line).  
+```{r}
+cor.test(flights$arr_delay, flights$distance)
+
+```
+This shows very weak correlation, as expected.  
+The correlation coefficiant is almost 0 (-0.06186776), which indicate no relationship.  
+Lets try departure_delay:
+```{r}
+ggplot(flights, aes(x=distance, y=dep_delay)) + geom_point(na.rm=TRUE)
+```
+```{r}
+cor.test(flights$distance, flights$dep_delay)
+```
+Nope, even less correlation !  
+-0.02167079
+
+## Exercise
+
+**Investigate if departure delay is associated with weather conditions at the origin airport.**  
+**This includes descriptives (mean departure delay), plotting, regression modelling, considering missing values etc.**  
+
+Lets first invastigate the mean departure delays across weather conditions.  
+Calculating means requires, that we first investigave missing values. Calculating MEAN in NA will return NA.  
+
+```{r}
+summary(flights$dep_delay)
+
+```
+Looks like there are 8255 missing.  
+Lets consider this: missing departure delays must mean, that there is no delay, eg. the flight left on time.  
+This is my own interpretation, as I have no contact with domain knowledge to ask and the documentation does not contain an answer.
+Thus, lets set the dep_delay to 0 if it is missing, before calculating means. Since we will be using this filter again and again, lets persist it in a new dataset, although it could also generally be handled with na.action functions.
+```{r}
+myFlights <- flights %>% mutate(dep_delay = ifelse(is.na(dep_delay), 0, dep_delay))
+aggregate(myFlights$dep_delay, by=list(flights$origin), FUN=mean) %>% 
+  pander(., big.mark=',', justify = c('left','right'))
+```
+Looks like there is some difference between the means.  
+Lets take a closer look, using a barplot.
+```{r}
+ggplot(data = myFlights, mapping = aes(x = origin, y=dep_delay)) +
+  geom_bar(stat='summary')
+```
+
+So, lets see, if these delays are associated with weather conditions.  
+Here, weather condisions are described by the variables in the weather dataset, so we first need to join flight 
+data and weather data, eg. answering then question "How was the weather, when the flight was supposed to leave".    
+  
+Weatherinformation are point-in-time information and scheduled departure time is aswell. However, the time_hour 
+column in flights dataset describes which weather measurement describes the departure, so no need to mutate and doing a between join.  
+
+Turning to SQL syntax to do the join - deliberately using a left join to see, if anything is missing in the weather data:
+
+```{r}
+myFlightWeather <- sqldf('select a.origin, a.dep_delay, a.time_hour as flightsTime, 
+                                 b.time_hour as weatherTime, b.temp, b.dewp, b.humid, 
+                                 b.wind_dir,b.wind_speed,wind_gust, b.precip, b.pressure, 
+                                 b.visib 
+                            from myFlights a left outer join 
+                                 weather b on a.origin = b.origin 
+                             and a.time_hour = b.time_hour') 
+summary(myFlightWeather)
+```
+By looking at weatherTime column, it looks like, there are 1199 flights that cannot be paired with weather data because of missing weather data.  
+Lets see how many gaps there are in the weather data - it is supposed to have one measurement every hour  
+
+```{r}
+myExtendedWeather <- mutate(weather, validFrom = time_hour, 
+                            validTo = lead(time_hour)-1, gap=(lead(time_hour)-time_hour)) 
+sqldf('select gap||" - hours" as gaps, 
+              count(*) as antal 
+        from myExtendedWeather 
+        group by gap') %>% pander(., big.mark=',', justify = c('left','right'))
+
+```
+Looks like, if we accept up to 2 hours old weatherdata, we can include 30 more flights, but since we do not know wether this is acceptable, we wont. So, we will turn to inner-joining instead.  
+```{r}
+myFlightWeather <- sqldf('select a.origin, a.dep_delay, a.time_hour as flightsTime, 
+                                 b.time_hour as weatherTime, b.temp, b.dewp, b.humid, 
+                                 b.wind_dir, b.wind_speed, wind_gust, b.precip, b.pressure, 
+                                 b.visib 
+                            from myFlights a inner join 
+                                 myExtendedWeather b on a.origin = b.origin 
+                             and a.time_hour = b.time_hour') 
+summary(myFlightWeather)
+```
+
+So, now that we paired departure delays with weatherdata, lets take a look at the data:  
+We discover, that we still have columns with missing data in the dataset. For the rest of the columns, lets replace the missing values with the mean on the actual existing observations by creating a vector referencing the rows with missing values for temperature and using it to isolate these rows:
+```{r}
+
+myFlightWeather$temp[which(is.na(myFlightWeather$temp))] <- 
+  mean(myFlightWeather$temp, na.rm=TRUE)
+myFlightWeather$dewp[which(is.na(myFlightWeather$dewp))] <- 
+  mean(myFlightWeather$dewp, na.rm=TRUE)
+myFlightWeather$humid[which(is.na(myFlightWeather$humid ))] <- 
+  mean(myFlightWeather$humid, na.rm=TRUE)
+myFlightWeather$wind_dir[which(is.na(myFlightWeather$wind_dir))] <- 
+  mean(myFlightWeather$wind_dir, na.rm=TRUE)
+myFlightWeather$wind_speed[which(is.na(myFlightWeather$wind_speed))] <- 
+  mean(myFlightWeather$wind_speed, na.rm=TRUE)
+myFlightWeather$wind_gust[which(is.na(myFlightWeather$wind_gust))] <- 
+  mean(myFlightWeather$wind_gust, na.rm=TRUE)
+myFlightWeather$pressure[which(is.na(myFlightWeather$pressure))] <-
+  mean(myFlightWeather$pressure, na.rm=TRUE)
+summary(myFlightWeather)
+```
+
+We now have a "clean" dataset to work on, so lets see if departure deplay is associated with weather conditions:  
+Fitting a linear model, trying to predict the dep_delay from weather variables.  
+```{r}
+myModel <- lm(dep_delay ~ temp+dewp+humid+wind_dir+wind_speed+wind_gust+precip+pressure+
+                visib,myFlightWeather)
+summary(myModel)
+```
+
+Funny enough, the model does not calculate coefficients for wind_gust (they are NA in the above summary) why is this ? Well, linear regression expects the explaining variables to be independent, which in this case, they are not. 
+
+Check it out below, wind_gust actually correlates to wind_speed very much :
+```{r}
+cor.test(~ wind_gust + wind_speed, myFlightWeather)
+#cor.test(myFlightWeather$wind_gust, myFlightWeather$wind_speed, )
+```
+
+Back to the model: we have an Adjusted R-squared, which tells us the amount of variation in dep_delay variable that is explained by variation in the explaining variables, here 0.02039 eg about 2%. which is very little. That means, that we cannot say, that dep_delays are associated with weather conditions.
+
+## Exercise
+
+**Is the age of the plane associated to delay?** 
+
+```{r}
+## Note another technique to replace NA values
+myPlaneDelays <- sqldf('select a.year, 
+                               case when dep_delay is null then 0 
+                                    else dep_delay end 
+                                 as dep_delay 
+                          from planes a inner join 
+                               flights b on a.tailnum = b.tailnum')
+cor.test(~ dep_delay + year, myPlaneDelays)
+```
+Peaesons correlations coefficient falls in the intervakl btwn -1 and 1. The closer to -1 or 1 it is, the stringer the correlation is, eg 0 means no correlation.  
+  
+This test shows a Pearsons test value of 0.016, which means, that there is hardly any correlation. So, NO, age and departure delay are not associated.
+
+## Exercise
+
+**It seems like the plane manufacturer could use a cleaning. After that, how many manufacturers have more than 200 planes?**  
+**And how many flights are each manufacturer with more than 200 planes responsible for?**  
+
+Lets take a look at the Manufacturer column:
+```{r}
+sqldf('select manufacturer, 
+              count(*) 
+         from planes 
+        group by manufacturer ')
+```
+
+It looks like the manuafacturer name can be standardized by isolating the first part of the string (until first occurance of space character).  
+Lets utillize some simple regex.
+```{r}
+myPlanes <- mutate(planes, myManufacturerName = str_extract(manufacturer,"^\\w*")) %>% 
+  select(myManufacturerName, tailnum)
+```
+
+Below, the number of planes pr. manufacturer is plottet. It is clear, that there are 5 manufacturers with more than 200 planes
+```{r}
+g <- ggplot(myPlanes, aes(myManufacturerName))
+g + geom_bar() + theme(axis.text.x = element_text(angle = 60, hjust = 1)) + 
+  geom_hline(aes(yintercept=200), colour="#990000", linetype="dashed")
+```
+
+Also, the actual count is listed.  
+```{r}
+topManufacturers <- sqldf('select myManufacturerName, count(*) 
+                             from myPlanes 
+                            group by myManufacturerName 
+                           having count(*) > 200') 
+pander(topManufacturers, big.mark=',', justify = c('left','right'))
+```
+
+Top manufacturers (>200 planes) are responsible for the following number of flights.  
+```{r}
+manufacturerFlights <-
+sqldf('select a.myManufacturerName, 
+              count(*) as numberOfFlights
+         from topManufacturers a 
+        inner join 
+              myPlanes b on a.myManufacturerName = b.myManufacturerName  
+        inner join 
+              flights c  on b.tailnum = c.tailnum 
+        group by a.myManufacturerName
+        order by count(*) desc')
+
+g <- ggplot(manufacturerFlights, 
+            aes(x=myManufacturerName, y=numberOfFlights, label=numberOfFlights))
+g + geom_bar(stat='identity') + theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
+  geom_text(size = 3, position = position_stack(vjust = 0.8))
+
+```
+
+## Exercise
+
+**It turns out that Airbus has several main models, e.g. several A320 (A320-211, A320-212 etc.) and so on.**  
+**Create a frequency table of the main models for Airbus and how many planes there are in each.**
+
+Assuming that Airbus main models are all defined by the first 4 characters in the name:
+```{r}
+airbusFreqs <- sqldf('select substr(model,1,4) as model, count(*) as frequency 
+                        from planes 
+                      where lower(manufacturer) like "%airbus%" 
+                      group by substr(model,1,4) 
+                      order by count(*) desc')
+pander(airbusFreqs, big.mark=',', justify = c('left','right'))
+
+```
+## Exercise
+
+**Are larger planes (measured by number of seats) more or less delayed than smaller planes?**  
+
+This question implies a correlation between the number of seats and delay - lets test this
+```{r}
+seatDelays <- sqldf('select a.seats, 
+                            case when arr_delay is null then 0 
+                                 else arr_delay end 
+                              as arr_delay 
+                       from planes a inner join 
+                            flights b on a.tailnum = b.tailnum')
+cor.test(~ arr_delay + seats, seatDelays)
+```
+
+There does not seem to be a correlation between number of seats and arr_delays (Pearsons -0.07).  
+We can flit this model aswell
+```{r}
+l <- lm(arr_delay ~ seats, seatDelays)
+summary(l)
+```
+
+However the adjusted R-squared allso tells us, that very little of the variation in arrival delay is explained by the number of seats.  
+How about departure delay ?
+```{r}
+seatDelays <- sqldf('select a.seats, 
+                            case when dep_delay is null then 0 
+                                 else dep_delay end 
+                              as dep_delay 
+                       from planes a inner join 
+                            flights b on a.tailnum = b.tailnum')
+cor.test(~ dep_delay + seats, seatDelays)
+```
+
+There does not seem to be a correlation between number of seats and arr_delays (Pearsons -0.07).  
+We can fit this model aswell.
+```{r}
+l <- lm(dep_delay ~ seats, seatDelays)
+summary(l)
+```
+It looks like the same result - we cannot say, that there is a relationship between the number of seats and plane delay.
+
+## Exercise
+
+**On a map (`map_data("usa")`), plot the airports that has flights to them.**  
+
+Creating a dataset with destination airport coordinates (long/lat).  
+Below is two different approaches for illustration purposes, SQL-syntax and R-syntax, utillizing pipe operator from dplyr. Lets continue with the R-version, not that it matters much - both contain the same data (101 observations, 3 variables)
+```{r}
+mySqlAirports <- sqldf('select distinct a.faa, 
+                               a.lat, a.lon 
+                          from airports a inner join 
+                               flights b on (a.faa = b.dest) 
+                         order by a.faa')
+myAirports <- airports %>% mutate(dest = faa) %>% inner_join(flights) %>% 
+  select(faa, lat, lon) %>% distinct %>% arrange(faa)
+
+## Adding the myAirports dataset as points on the map
+usa <- map_data("usa")
+myMap <- ggplot() + 
+  geom_polygon(data = usa, aes(x = long, y = lat, group = group), fill = "grey") + 
+    geom_point(data = myAirports, aes(x = lon, y = lat), color = "black", size = 1) +
+  coord_quickmap()
+myMap
+```
+
+Oops, two destination airports are outside the map.  
+Lets just add a label to see, that its ANC (Anchorage) and HNL (Honolulu), which is in Alaska and Hawaii.  
+So, apparently, the USA map only covers mainland USA
+```{r}
+myMap + geom_text(data = myAirports, 
+                  aes(x = lon, y = lat, label = faa), color = "black", hjust=1,size=3)
+```
+
+We have to borrow Canada and Hawaii from the world map.  
+Alaska includes far western Aleutian Islands, but we dont need them here and they distort the map because they are so far away, so lets drop everything further west than 180 degrees and add Alaska and Hawaii to the map.  
+```{r}
+library(mapdata)
+ak<-map_data('worldHires','USA:Alaska')
+ak<-subset(ak,long<0)  
+hw<-map_data('worldHires','Hawaii')
+
+myMapOfNorthAm <- myMap +
+  geom_polygon(data=ak,    aes(x = long, y = lat, group = group), fill="grey") +
+  geom_polygon(data=hw,    aes(x = long, y = lat, group = group), fill="grey") 
+myMapOfNorthAm
+
+```
+
+**Make a similar plot, but now points must have size relative to the number of flights each airport is destination for.**  
+
+Lets make a new variable that describe this number of flights, and use this variable for the "size" parameter on the map
+```{r}
+myAirportsAndflights <- sqldf('select a.faa, a.lat, a.lon, count(*) as numOfFlights 
+                                 from airports a inner join 
+                                      flights b on (a.faa = b.dest) 
+                                group by a.faa, a.lat, a.lon 
+                                order by a.faa')
+
+ggplot() + 
+  geom_polygon(data = usa, aes(x = long, y = lat, group = group), fill = "grey") + 
+    geom_point(data = myAirportsAndflights, 
+               aes(x = lon, y = lat, size=numOfFlights), color = "black") +
+    geom_polygon(data=ak,    aes(x = long, y = lat, group = group), fill="grey") +
+    geom_polygon(data=hw,    aes(x = long, y = lat, group = group), fill="grey") 
+ 
+```
+
+That makes airports blur together. Lets try alpha instead.  
+That makes it easier to see the top destinations, but it also erases the lowest ranking so it depends on what we are trying th achieve.
+```{r}
+ggplot() + 
+  geom_polygon(data = usa, aes(x = long, y = lat, group = group), fill = "grey") + 
+    geom_point(data = myAirportsAndflights, 
+               aes(x = lon, y = lat, alpha=numOfFlights), color = "black") +
+    geom_polygon(data=ak,    aes(x = long, y = lat, group = group), fill="grey") +
+    geom_polygon(data=hw,    aes(x = long, y = lat, group = group), fill="grey") 
+
+```
+
+## Exercise
+
+**Do a principal component analysis of the weather at JFK using the following columns:**  
+**`temp, dewp, humid, wind_dir, wind_speed, precip, visib` (only on `complete.cases()`).**  
+  
+** How many principal components should be used to capture the variability in the weather data?**  
+  
+Lets start by ploting each variable againt eachother, to get a visual sense of data.
+```{r}
+myPcaWeather <- weather %>% select(temp, dewp, humid, wind_dir, wind_speed, precip, visib) 
+myCompleteWeather <- myPcaWeather[complete.cases(myPcaWeather), ]
+library(GGally)
+GGally::ggpairs(myCompleteWeather)
+```
+First of all, we see that variables are on completely different scales, so we need to normalize the variables when doing the PCA. Secondly, we see, that temperature (temp) and dewpoint(dewp) seem correlated, which could indicate, that there is some redundancy in the variables (inter-correlations). Just for fun, lets test the correlation between temp and dewp using the cor.test to show, that it is essentially the same measure as in the plot above.:  
+
+```{r}
+cor.test(weather$temp, weather$dewp)
+```
+A persons correlation of 0.89 reviels a almost perfect correlation. Without being a meteorologist, this still doesnt come as a surprise.  
+
+So, lets do the PCA to see, if we can reduce the number of variables.  
+We will do the PCA and take a look at the portion of variance explained by each PC.  
+  
+To determine how many principle components to be used to determine a "reasonable" amount of the total variance, different methods could be applied. First off, the "eigenvalue-one" criterion (or the "Kaiser criterion") could be applied- which means choosing PCs with an eigenvalue greater than 1.  
+  
+This is equivalent to choosing any PC that is responsible for a greater part of the variance than any one variable. prcomp stores the standard-deviations of each PC which is just the square root of the variance (eg. the eigenvalue).  
+  
+Ths suggests using the first three PCs.
+```{r}
+myPca <- prcomp(myCompleteWeather, scale. = T)
+myPca$sdev^2
+```
+Another criterion would be the "Scree test", which requires us to plot the eigenvalues.  
+In this approach, we look for a sudden descend in the variance accounted for. In this case, there is no obvious break, except maybe after the fifth PC. This break is not that significant, but it does suggest using the first 5 PCs  
+```{r}
+plot(myPca$sdev^2, type="b")
+```
+
+
+A third approach could be the proportion of variance accounted for.  
+
+We could decide, that we want at least 70% of the variance in the data explained and that we wanted to include all PCs that explain 
+atleast 10% of the variance. These measures is printed below, and this indicates that the first 5 PC??s should be used, since PC5 accounts for almost excactly 10% and this would mean including about 93% of the total variance.  
+  
+So, since two of the approaches suggest using 5 PCs, that is what I will choose.  
+
+Another reason for choosing 5 PCs is that in this case we can afford it, with regards to the size of the dataset and processing time, if we were to proceed building a model on these new variables (PCs). In other scenarios it could be, that the amount of data would be a reason to minimize the number of PCs chosen for further processing.
+```{r}
+summary(myPca)
+```
+
+
